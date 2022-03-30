@@ -142,7 +142,7 @@ Matrix2 = data.matrix(SeqTab2)
 sample.names2 = SeqTab2[, 1]
 rownames(Matrix2) = sample.names2
 
-## Merge the two monk ASV matrices
+## Merge the two ASV matrices
 mergetab = mergeSequenceTables(Matrix1, Matrix2)
 write.csv(mergetab, "mergeSequenceTables_Trial_14Mar2022.csv")
 
