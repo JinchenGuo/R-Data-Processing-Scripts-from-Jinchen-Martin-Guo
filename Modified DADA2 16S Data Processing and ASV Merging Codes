@@ -1,0 +1,149 @@
+## Modified DADA2 Pipeline for Processing the COI Data from individual fastq files to an ASV table.
+## This pipeline is modified from the "Basic_pipeline_DADA2" R script shared by Katrina.
+## Using the HMSARMS data as an example
+
+## Loading the necessary R packages:
+library(ape)
+library(vegan)
+library(ggplot2)
+library(picante)
+library(plyr)
+library(dada2)
+library("magrittr") # For piping expression in the script
+
+setwd("C:/Users/guoji/OneDrive/Desktop/HMSARMS")
+path <- ("C:/Users/guoji/OneDrive/Desktop/HMSARMS") # The original fastq files are unzipped here.
+
+# Forward and reverse fastq filenames have format: SAMPLENAME_R1_001.fastq and SAMPLENAME_R2_001.fastq
+fnFs <- sort(list.files(path, pattern="_R1_001.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_R2_001.fastq", full.names = TRUE))
+
+# Extract sample names, assuming filenames have format: SAMPLENAME_XXX.fastq
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+
+# Generate quality plots of 2 samples in forward and reverse
+# The primers can be seen next to the y-axis below the very top data line
+plotQualityProfile(fnFs[1:2]) 
+plotQualityProfile(fnRs[1:2])
+
+# Primers are removed in a separate terminal using the "cutadapt" function:
+
+# mkdir trimmed
+# for f in $(ls -1 *R1_001.fastq|sed 's/\_R1_001.fastq//')
+# do
+# cutadapt -g file:mICOIintF_primers.txt -G file:jgHCO2198_primers_rev.txt -o trim/"$f"_R1_001_trim.fastq -p trim/"$f"_R2_001_trim.fastq "$f"_R1_001.fastq "$f"_R2_001.fastq -O 5 -e 0.1
+# done
+
+# The primer-trimmed data will be transferred to a subfoler named "trimmed" in the R working directory:
+path2 <- ("C:/Users/guoji/OneDrive/Desktop/HMSARMS/trimmed")
+
+# Read the trimmed sequence files in
+cutFs <- sort(list.files(path2, pattern = "_R1_001_trim.fastq", full.names = TRUE))
+cutRs <- sort(list.files(path2, pattern = "_R2_001_trim.fastq", full.names = TRUE))
+get.sample.name <- function(fname) strsplit(basename(fname), "_")[[1]][1]
+sample.names <- unname(sapply(cutFs, get.sample.name))
+head(sample.names)
+
+# Check the quality of reads in the sequences with the primers removed
+# Confirm primers are gone on the plots
+plotQualityProfile(cutFs[1:2])
+plotQualityProfile(cutRs[1:2])
+
+# Place primer trimmed, filtered files in filtered/ subdirectory, to be stored as fastq files
+filtFs <- file.path(path2, "filtered", basename(cutFs))
+filtRs <- file.path(path2, "filtered", basename(cutRs))
+
+# Removing spurious small sequences and phix, try various outcomes for this to see how to save more sequences by making this step more lenient
+out4 <- filterAndTrim(cutFs, filtFs, cutRs, filtRs, maxN = 0, maxEE = c(5, 5), 
+                     truncQ = 2, minLen = 50, rm.phix = TRUE, compress = TRUE, multithread = TRUE)
+
+# Observing and exploring errors in base switching
+errF <- learnErrors(filtFs, multithread=TRUE)
+errR <- learnErrors(filtRs, multithread=TRUE)
+plotErrors(errF, nominalQ=TRUE)
+plotErrors(errR, nominalQ=TRUE)
+
+# Dereplicate identical reads and name the derep-class objects by the sample names
+derepFs <- derepFastq(filtFs, verbose = TRUE)
+derepRs <- derepFastq(filtRs, verbose = TRUE)
+names(derepFs) <- sample.names
+names(derepRs) <- sample.names
+
+# Sample inference
+dadaFs <- dada(derepFs, err=errF, multithread=TRUE)
+dadaRs <- dada(derepRs, err=errR, multithread=TRUE)
+
+# To look at returned dada-class object:
+dadaFs[[12]]
+dadaRs[[12]]
+
+# Merge the sequences
+mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs, verbose=TRUE, maxMismatch = 10)
+head(mergers[[1]])
+
+# To make an ASV table and inspect the sequence lengths 
+MERCseqtab <- makeSequenceTable(mergers)
+dim(MERCseqtab)
+table(nchar(getSequences(MERCseqtab)))
+
+# To make an ASV table just for the sequences whose length is between 307 and 319 bp
+MERCseqtab2 <- MERCseqtab[,nchar(colnames(MERCseqtab)) %in% 307:319]
+dim(MERCseqtab2)
+table(nchar(getSequences(MERCseqtab2)))
+
+# Remove chimeras
+MERCseqtab.nochim <- removeBimeraDenovo(MERCseqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+rownames(MERCseqtab.nochim) <- sample.names
+dim(MERCseqtab.nochim)
+sum(MERCseqtab.nochim)/sum(MERCseqtab)
+
+# Remove chimeras from the MERCseqtab2 table
+MERCseqtab2.nochim <- removeBimeraDenovo(MERCseqtab2, method="consensus", multithread=TRUE, verbose=TRUE)
+rownames(MERCseqtab2.nochim) <- sample.names
+dim(MERCseqtab2.nochim)
+sum(MERCseqtab2.nochim)/sum(MERCseqtab2)
+
+# Final check allows you to track reads through the pipeline
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out4, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(MERCseqtab.nochim))
+# If processing a single sample, remove the sapply calls: e.g. replace sapply(dadaFs, getN) with getN(dadaFs)
+colnames(track) <- c("reads.in", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+track
+write.csv(track, "HMSARMS2013&2015_ReadsTracking.csv")
+
+# Final checks on the MERCseqtab2-associated metrics
+getN <- function(x) sum(getUniques(x))
+track2 <- cbind(out4, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(MERCseqtab2.nochim))
+colnames(track2) <- c("reads.in", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track2) <- sample.names
+track2
+write.csv(track2, "HMSARMS2013&2015_307to319_ReadsTracking.csv")
+
+# To make a final ASV table
+write.csv(MERCseqtab.nochim, "HMSARMS2013&2015_ASVtable.csv")
+write.csv(MERCseqtab2.nochim, "HMSARMS2013&2015_307to319_ASVtable.csv")
+
+#############################################################################################################################
+
+## Below is what I've tried to merge multiple ASV tables. ASV tables of various projects/datasets were generated from the modified pipeline above.
+
+library("dada2") ## The "dada2" package may be required.
+
+## Load the first ASV table
+SeqTab1 = read.csv("HMSARMS2013&2015_307to319_ASVtable.csv", header = TRUE)
+Matrix1 = data.matrix(SeqTab1) ## ASV tables in the .csv format don't seem to work with the "mergeSequenceTables" command.
+sample.names = SeqTab1[, 1]
+rownames(Matrix1) = sample.names
+
+## Load the second ASV table
+SeqTab2 = read.csv("SantaBarbaraPlates2017FB_307to319_ASVtable.csv", header = TRUE)
+Matrix2 = data.matrix(SeqTab2)
+sample.names2 = SeqTab2[, 1]
+rownames(Matrix2) = sample.names2
+
+## Merge the two monk ASV matrices
+mergetab = mergeSequenceTables(Matrix1, Matrix2)
+write.csv(mergetab, "mergeSequenceTables_Trial_14Mar2022.csv")
+
+
